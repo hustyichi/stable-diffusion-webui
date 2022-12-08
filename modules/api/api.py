@@ -19,6 +19,10 @@ from modules.sd_models import checkpoints_list
 from modules.realesrgan_model import get_realesrgan_models
 from typing import List
 
+import torch
+from torch import autocast
+from diffusers import StableDiffusionPipeline, DDIMScheduler
+
 def upscaler_to_index(name: str):
     try:
         return [x.name.lower() for x in shared.sd_upscalers].index(name.lower())
@@ -75,7 +79,7 @@ class Api:
         self.router = APIRouter()
         self.app = app
         self.queue_lock = queue_lock
-        self.add_api_route("/sdapi/v1/txt2img", self.text2imgapi, methods=["POST"], response_model=TextToImageResponse)
+        self.add_api_route("/sdapi/v1/txt2img", self.text2imgnewapi, methods=["POST"], response_model=TextToImageResponse)
         self.add_api_route("/sdapi/v1/img2img", self.img2imgapi, methods=["POST"], response_model=ImageToImageResponse)
         self.add_api_route("/sdapi/v1/extra-single-image", self.extras_single_image_api, methods=["POST"], response_model=ExtrasSingleImageResponse)
         self.add_api_route("/sdapi/v1/extra-batch-images", self.extras_batch_images_api, methods=["POST"], response_model=ExtrasBatchImagesResponse)
@@ -108,6 +112,43 @@ class Api:
                 return True
 
         raise HTTPException(status_code=401, detail="Incorrect username or password", headers={"WWW-Authenticate": "Basic"})
+
+    def text2imgnewapi(self, txt2imgreq: StableDiffusionTxt2ImgProcessingAPI):
+        print("-------------->")
+        print(shared.sd_model)
+        # model_path = "/home/cfv/stable-diffusion-webui/models/Stable-diffusion/sd-v1-4.ckpt"
+        model_path = "/home/cfv/tmp/cache"
+
+        # scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
+        # pipe = StableDiffusionPipeline.from_pretrained(model_path, scheduler=scheduler, safety_checker=None, torch_dtype=torch.float16).to("cuda")
+
+        pipe = StableDiffusionPipeline.from_pretrained(model_path).to("cuda")
+
+        g_cuda = None
+
+        prompt = "potrait of [P] person , best quality, masterpiece, smooth render" #@param {type:"string"}
+        negative_prompt = "cross eye"
+        num_samples = 6
+        guidance_scale = 15
+        num_inference_steps = 50
+        height = 512
+        width = 512
+
+        with autocast("cuda"), torch.inference_mode():
+            images = pipe(
+                prompt,
+                height=height,
+                width=width,
+                negative_prompt=negative_prompt,
+                num_images_per_prompt=num_samples,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=g_cuda
+            ).images
+
+        b64images = list(map(encode_pil_to_base64, images))
+        return TextToImageResponse(images=b64images, parameters={}, info="")
+
 
     def text2imgapi(self, txt2imgreq: StableDiffusionTxt2ImgProcessingAPI):
         populate = txt2imgreq.copy(update={ # Override __init__ params
@@ -244,7 +285,7 @@ class Api:
     def interrogateapi(self, interrogatereq: InterrogateRequest):
         image_b64 = interrogatereq.image
         if image_b64 is None:
-            raise HTTPException(status_code=404, detail="Image not found") 
+            raise HTTPException(status_code=404, detail="Image not found")
 
         img = decode_base64_to_image(image_b64)
         img = img.convert('RGB')
@@ -257,7 +298,7 @@ class Api:
                 processed = deepbooru.model.tag(img)
             else:
                 raise HTTPException(status_code=404, detail="Model not found")
-        
+
         return InterrogateResponse(caption=processed)
 
     def interruptapi(self):
